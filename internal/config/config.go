@@ -3,7 +3,9 @@ package config
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -36,7 +38,8 @@ type SQLConfig struct {
 	Port     int    `yaml:"port"`
 	Database string `yaml:"database"`
 	Username string `yaml:"username"`
-	Password string `yaml:"password"`
+	Password        string `yaml:"password"`
+	PasswordCommand string `yaml:"passwordCommand,omitempty"`
 	SSLMode  string `yaml:"sslMode"`
 	Name     string `yaml:"name"`
 	Timeout  int    `yaml:"timeout"`
@@ -452,6 +455,9 @@ func (m *SQLConfig) SetDriverOption(key, value string) {
 }
 
 func (m *SQLConfig) IsPasswordReadable() bool {
+	if m.PasswordCommand != "" {
+		return true
+	}
 	if !util.IsEncrypted(m.Password) {
 		return true
 	}
@@ -460,6 +466,38 @@ func (m *SQLConfig) IsPasswordReadable() bool {
 	}
 	_, _, err := util.DecryptPasswordWithMethod(m.Password, EncryptionKey)
 	return err == nil
+}
+
+// ResolvePassword returns the plaintext password using PasswordCommand, dycrption or the plain password
+func (m *SQLConfig) ResolvePassword() (string, error) {
+	if m.PasswordCommand != "" {
+		return m.runPasswordCommand()
+	}
+	if util.IsEncrypted(m.Password) {
+		if EncryptionKey == "" {
+			return "", fmt.Errorf("connection has an encrypted password but no encryption key is loaded")
+		}
+		decrypted, _, err := util.DecryptPasswordWithMethod(m.Password, EncryptionKey)
+		if err != nil {
+			return "", err
+		}
+		return decrypted, nil
+	}
+	return m.Password, nil
+}
+
+func (m *SQLConfig) runPasswordCommand() (string, error) {
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.Command("cmd", "/c", m.PasswordCommand)
+	} else {
+		cmd = exec.Command("sh", "-c", m.PasswordCommand)
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("password command %q failed: %w", m.PasswordCommand, err)
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 func (m *SQLConfig) buildDSNFromFields(password string) string {
@@ -503,6 +541,17 @@ func (m *SQLConfig) GetDSN() string {
 
 // GetDecryptedDSN returns the DSN with decrypted password.
 func (m *SQLConfig) GetDecryptedDSN() string {
+	if m.PasswordCommand != "" {
+		pw, err := m.runPasswordCommand()
+		if err != nil {
+			log.Error().Err(err).Msg("Failed to run password command")
+			pw = ""
+		}
+		if m.DSN != "" {
+			return util.InjectDSNPassword(m.GetDSN(), pw)
+		}
+		return m.buildDSNFromFields(pw)
+	}
 	dsn := m.GetDSN()
 	if util.IsMultiHostDSN(dsn) && m.Password != "" {
 		pw := m.Password
