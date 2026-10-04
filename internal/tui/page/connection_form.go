@@ -189,6 +189,7 @@ func (cf *ConnectionForm) buildForm(driver string) {
 		}
 	}
 	cf.form.ApplyClipboard()
+	cf.setupPasswordMutualGraying()
 
 	// Options section is common to all drivers.
 	rowLimit := ""
@@ -342,4 +343,63 @@ func (cf *ConnectionForm) cancel() {
 	if cf.onCancel != nil {
 		cf.onCancel()
 	}
+}
+
+// setupPasswordMutualGraying grays out and blocks input on whichever of the
+// Password / Password command fields is not in use, updating live as the user types.
+func (cf *ConnectionForm) setupPasswordMutualGraying() {
+	pwItem := cf.form.GetFormItemByLabel("Password")
+	pcItem := cf.form.GetFormItemByLabel("Password command")
+	if pwItem == nil || pcItem == nil {
+		return
+	}
+	pwField := pwItem.(*tview.InputField)
+	pcField := pcItem.(*tview.InputField)
+
+	styles := cf.App.GetStyles()
+	normalText := styles.Global.TextColor.Color()
+	normalBg := styles.Global.ContrastBackgroundColor.Color()
+	normalLabel := styles.Global.SecondaryTextColor.Color()
+	dimColor := styles.Global.DimColor.Color()
+
+	blockInput := func(event *tcell.EventKey) *tcell.EventKey {
+		switch event.Key() {
+		case tcell.KeyRune, tcell.KeyBackspace, tcell.KeyBackspace2, tcell.KeyDelete:
+			return nil
+		}
+		return event
+	}
+
+	updateState := func() {
+		pwFilled := pwField.GetText() != ""
+		pcFilled := pcField.GetText() != ""
+
+		if pwFilled {
+			pcField.SetLabelColor(dimColor)
+			pcField.SetFieldTextColor(dimColor)
+			pcField.SetFieldBackgroundColor(normalBg)
+			pcField.SetInputCapture(blockInput)
+		} else {
+			pcField.SetLabelColor(normalLabel)
+			pcField.SetFieldTextColor(normalText)
+			pcField.SetFieldBackgroundColor(normalBg)
+			pcField.SetInputCapture(nil)
+		}
+
+		if pcFilled {
+			pwField.SetLabelColor(dimColor)
+			pwField.SetFieldTextColor(dimColor)
+			pwField.SetFieldBackgroundColor(normalBg)
+			pwField.SetInputCapture(blockInput)
+		} else {
+			pwField.SetLabelColor(normalLabel)
+			pwField.SetFieldTextColor(normalText)
+			pwField.SetFieldBackgroundColor(normalBg)
+			pwField.SetInputCapture(nil)
+		}
+	}
+
+	pwField.SetChangedFunc(func(_ string) { updateState() })
+	pcField.SetChangedFunc(func(_ string) { updateState() })
+	updateState() // apply immediately for pre-filled edit mode
 }
