@@ -189,7 +189,7 @@ func (cf *ConnectionForm) buildForm(driver string) {
 		}
 	}
 	cf.form.ApplyClipboard()
-	cf.setupPasswordMutualGraying()
+	cf.setupPasswordMutualExclusion()
 
 	// Options section is common to all drivers.
 	rowLimit := ""
@@ -349,9 +349,11 @@ func (cf *ConnectionForm) cancel() {
 	}
 }
 
-// setupPasswordMutualGraying grays out and blocks input on whichever of the
-// Password / Password command fields is not in use, updating live as the user types.
-func (cf *ConnectionForm) setupPasswordMutualGraying() {
+// setupPasswordMutualExclusion blocks whichever of the Password / Password
+// command fields isn't in use and hints why. The hint is a placeholder, not a
+// color change: the form overwrites field colors on every draw but leaves
+// placeholders alone.
+func (cf *ConnectionForm) setupPasswordMutualExclusion() {
 	pwItem := cf.form.GetFormItemByLabel("Password")
 	pcItem := cf.form.GetFormItemByLabel("Password command")
 	pwField, pwOK := pwItem.(*tview.InputField)
@@ -360,11 +362,9 @@ func (cf *ConnectionForm) setupPasswordMutualGraying() {
 		return
 	}
 
-	styles := cf.App.GetStyles()
-	normalText := styles.Global.TextColor.Color()
-	normalBg := styles.Global.ContrastBackgroundColor.Color()
-	normalLabel := styles.Global.SecondaryTextColor.Color()
-	dimColor := styles.Global.DimColor.Color()
+	dimColor := cf.App.GetStyles().Global.DimColor.Color()
+	pwField.SetPlaceholderTextColor(dimColor)
+	pcField.SetPlaceholderTextColor(dimColor)
 
 	blockInput := func(event *tcell.EventKey) *tcell.EventKey {
 		switch event.Key() {
@@ -374,16 +374,12 @@ func (cf *ConnectionForm) setupPasswordMutualGraying() {
 		return event
 	}
 
-	applyState := func(field *tview.InputField, inactive bool) {
+	applyState := func(field *tview.InputField, inactive bool, hint string) {
 		if inactive {
-			field.SetLabelColor(dimColor)
-			field.SetFieldTextColor(dimColor)
-			field.SetFieldBackgroundColor(normalBg)
+			field.SetPlaceholder(hint)
 			field.SetInputCapture(blockInput)
 		} else {
-			field.SetLabelColor(normalLabel)
-			field.SetFieldTextColor(normalText)
-			field.SetFieldBackgroundColor(normalBg)
+			field.SetPlaceholder("")
 			field.SetInputCapture(nil)
 		}
 	}
@@ -392,10 +388,9 @@ func (cf *ConnectionForm) setupPasswordMutualGraying() {
 		pwFilled := pwField.GetText() != ""
 		pcFilled := pcField.GetText() != ""
 
-		// Gray out and block only the empty, unused field. A filled field is
-		// never blocked, so if both ever hold text the user can still clear one.
-		applyState(pcField, pwFilled && !pcFilled)
-		applyState(pwField, pcFilled && !pwFilled)
+		// Block only the empty field so a filled one can always be cleared.
+		applyState(pcField, pwFilled && !pcFilled, "using password")
+		applyState(pwField, pcFilled && !pwFilled, "using password command")
 	}
 
 	pwField.SetChangedFunc(func(_ string) { updateState() })
