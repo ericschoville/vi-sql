@@ -1,60 +1,85 @@
 package config
 
 import (
-	"strings"
 	"testing"
 )
 
-func TestGetDecryptedDSN_PasswordCommand(t *testing.T) {
+func TestResolvePassword(t *testing.T) {
 	tests := []struct {
-		name         string
-		conn         SQLConfig
-		wantContains string
-		wantMissing  string
+		name    string
+		conn    SQLConfig
+		want    string
+		wantErr bool
 	}{
 		{
-			name: "command output used as password for field-based connection",
-			conn: SQLConfig{
-				Driver:          "postgres",
-				Host:            "localhost",
-				Port:            5432,
-				Database:        "mydb",
-				Username:        "alice",
-				PasswordCommand: "echo secretpass",
-			},
-			wantContains: "alice:secretpass@",
+			name: "password command output is used",
+			conn: SQLConfig{PasswordCommand: "echo secretpass"},
+			want: "secretpass",
 		},
 		{
-			name: "command output injected into explicit DSN",
-			conn: SQLConfig{
-				PasswordCommand: "echo secretpass",
-				DSN:             "postgres://alice@localhost:5432/mydb?sslmode=disable",
-			},
-			wantContains: "alice:secretpass@",
+			name: "command output is trimmed of surrounding whitespace",
+			conn: SQLConfig{PasswordCommand: "printf '  spaced  \\n'"},
+			want: "spaced",
 		},
 		{
-			name: "failed command returns DSN without password",
-			conn: SQLConfig{
-				Driver:          "postgres",
-				Host:            "localhost",
-				Port:            5432,
-				Database:        "mydb",
-				Username:        "alice",
-				PasswordCommand: "false",
-			},
-			wantContains: "alice@",
-			wantMissing:  "alice:",
+			name:    "failed password command errors",
+			conn:    SQLConfig{PasswordCommand: "false"},
+			wantErr: true,
+		},
+		{
+			name: "plaintext password passes through",
+			conn: SQLConfig{Password: "plain"},
+			want: "plain",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			dsn := tt.conn.GetDecryptedDSN()
-			if tt.wantContains != "" && !strings.Contains(dsn, tt.wantContains) {
-				t.Errorf("DSN %q does not contain %q", dsn, tt.wantContains)
+			got, err := tt.conn.ResolvePassword()
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ResolvePassword() err = %v, wantErr %v", err, tt.wantErr)
 			}
-			if tt.wantMissing != "" && strings.Contains(dsn, tt.wantMissing) {
-				t.Errorf("DSN %q should not contain %q", dsn, tt.wantMissing)
+			if !tt.wantErr && got != tt.want {
+				t.Errorf("ResolvePassword() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidatePasswordCommand(t *testing.T) {
+	tests := []struct {
+		name    string
+		conn    SQLConfig
+		wantErr bool
+	}{
+		{
+			name: "field mode with command is allowed",
+			conn: SQLConfig{Host: "localhost", PasswordCommand: "echo x"},
+		},
+		{
+			name: "field mode with masked display DSN is allowed",
+			conn: SQLConfig{Host: "localhost", DSN: "postgres://a:***@h/db", PasswordCommand: "echo x"},
+		},
+		{
+			name: "raw DSN without command is allowed",
+			conn: SQLConfig{DSN: "postgres://a@h/db"},
+		},
+		{
+			name:    "raw DSN with command is rejected",
+			conn:    SQLConfig{DSN: "postgres://a@h/db", PasswordCommand: "echo x"},
+			wantErr: true,
+		},
+		{
+			name:    "plain password with command is rejected",
+			conn:    SQLConfig{Host: "localhost", Password: "plain", PasswordCommand: "echo x"},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.conn.ValidatePasswordCommand(); (err != nil) != tt.wantErr {
+				t.Errorf("ValidatePasswordCommand() err = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}

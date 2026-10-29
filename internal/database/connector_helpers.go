@@ -41,10 +41,9 @@ func PreserveEncryptedPassword(fieldPassword string, editConn *config.SQLConfig)
 	return fieldPassword
 }
 
-// ResolvePasswordFields validates mutual exclusivity of the password and
-// passwordCommand form fields and returns (password, passwordCommand, error).
-// In edit mode, an empty password field preserves an existing encrypted
-// password when no command is provided.
+// ResolvePasswordFields errors if both the password and passwordCommand form
+// fields are set. In edit mode an empty password field preserves an existing
+// encrypted password when no command is provided.
 func ResolvePasswordFields(fieldPassword, fieldCmd string, editConn *config.SQLConfig) (string, string, error) {
 	if fieldPassword != "" && fieldCmd != "" {
 		return "", "", fmt.Errorf("password and password command are mutually exclusive — fill only one")

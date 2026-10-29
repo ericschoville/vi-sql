@@ -271,6 +271,10 @@ func (cf *ConnectionForm) save() {
 		modal.ShowError(cf.App.Pages, "Invalid connection", err)
 		return
 	}
+	if err := sqlCfg.ValidatePasswordCommand(); err != nil {
+		modal.ShowError(cf.App.Pages, "Invalid connection", err)
+		return
+	}
 	sqlCfg.Options = opts
 
 	var saveErr error
@@ -350,11 +354,11 @@ func (cf *ConnectionForm) cancel() {
 func (cf *ConnectionForm) setupPasswordMutualGraying() {
 	pwItem := cf.form.GetFormItemByLabel("Password")
 	pcItem := cf.form.GetFormItemByLabel("Password command")
-	if pwItem == nil || pcItem == nil {
+	pwField, pwOK := pwItem.(*tview.InputField)
+	pcField, pcOK := pcItem.(*tview.InputField)
+	if !pwOK || !pcOK {
 		return
 	}
-	pwField := pwItem.(*tview.InputField)
-	pcField := pcItem.(*tview.InputField)
 
 	styles := cf.App.GetStyles()
 	normalText := styles.Global.TextColor.Color()
@@ -370,33 +374,28 @@ func (cf *ConnectionForm) setupPasswordMutualGraying() {
 		return event
 	}
 
+	applyState := func(field *tview.InputField, inactive bool) {
+		if inactive {
+			field.SetLabelColor(dimColor)
+			field.SetFieldTextColor(dimColor)
+			field.SetFieldBackgroundColor(normalBg)
+			field.SetInputCapture(blockInput)
+		} else {
+			field.SetLabelColor(normalLabel)
+			field.SetFieldTextColor(normalText)
+			field.SetFieldBackgroundColor(normalBg)
+			field.SetInputCapture(nil)
+		}
+	}
+
 	updateState := func() {
 		pwFilled := pwField.GetText() != ""
 		pcFilled := pcField.GetText() != ""
 
-		if pwFilled {
-			pcField.SetLabelColor(dimColor)
-			pcField.SetFieldTextColor(dimColor)
-			pcField.SetFieldBackgroundColor(normalBg)
-			pcField.SetInputCapture(blockInput)
-		} else {
-			pcField.SetLabelColor(normalLabel)
-			pcField.SetFieldTextColor(normalText)
-			pcField.SetFieldBackgroundColor(normalBg)
-			pcField.SetInputCapture(nil)
-		}
-
-		if pcFilled {
-			pwField.SetLabelColor(dimColor)
-			pwField.SetFieldTextColor(dimColor)
-			pwField.SetFieldBackgroundColor(normalBg)
-			pwField.SetInputCapture(blockInput)
-		} else {
-			pwField.SetLabelColor(normalLabel)
-			pwField.SetFieldTextColor(normalText)
-			pwField.SetFieldBackgroundColor(normalBg)
-			pwField.SetInputCapture(nil)
-		}
+		// Gray out and block only the empty, unused field. A filled field is
+		// never blocked, so if both ever hold text the user can still clear one.
+		applyState(pcField, pwFilled && !pcFilled)
+		applyState(pwField, pcFilled && !pwFilled)
 	}
 
 	pwField.SetChangedFunc(func(_ string) { updateState() })
