@@ -20,8 +20,13 @@ func (s *Server) maxRows() int {
 
 func (s *Server) registerTools() {
 	mcpsdk.AddTool(s.server, &mcpsdk.Tool{
+		Name:        "list_connections",
+		Description: "List the database connections currently open in vi-sql. Pass a returned name as the 'connection' argument on other tools to target that database; omit it to use the active connection. Use this to query or collate across multiple databases.",
+	}, s.handleListConnections)
+
+	mcpsdk.AddTool(s.server, &mcpsdk.Tool{
 		Name:        "list_schemas",
-		Description: "List all schemas and their tables in the connected database",
+		Description: "List all schemas and their tables. Targets the active connection unless a 'connection' name is given.",
 	}, s.handleListSchemas)
 
 	mcpsdk.AddTool(s.server, &mcpsdk.Tool{
@@ -85,36 +90,48 @@ func (s *Server) registerTools() {
 }
 
 type listSchemasInput struct {
-	Filter string `json:"filter" jsonschema:"Optional name filter"`
+	Filter     string `json:"filter"     jsonschema:"Optional name filter"`
+	Connection string `json:"connection" jsonschema:"Optional open connection name to target; defaults to the active connection"`
 }
 
 type describeTableInput struct {
-	Schema string `json:"schema" jsonschema:"Schema name,required"`
-	Table  string `json:"table"  jsonschema:"Table name,required"`
+	Schema     string `json:"schema"     jsonschema:"Schema name,required"`
+	Table      string `json:"table"      jsonschema:"Table name,required"`
+	Connection string `json:"connection" jsonschema:"Optional open connection name to target; defaults to the active connection"`
 }
 
 type readQueryInput struct {
-	Query string `json:"query" jsonschema:"SQL SELECT query,required"`
+	Query      string `json:"query"      jsonschema:"SQL SELECT query,required"`
+	Connection string `json:"connection" jsonschema:"Optional open connection name to target; defaults to the active connection"`
 }
 
 type writeQueryInput struct {
-	Statement string `json:"statement" jsonschema:"SQL DML/DDL statement,required"`
+	Statement  string `json:"statement"  jsonschema:"SQL DML/DDL statement,required"`
+	Connection string `json:"connection" jsonschema:"Optional open connection name to target; defaults to the active connection"`
 }
 
-type getServerInfoInput struct{}
+type getServerInfoInput struct {
+	Connection string `json:"connection" jsonschema:"Optional open connection name to target; defaults to the active connection"`
+}
 
-type listEnumTypesInput struct{}
+type listEnumTypesInput struct {
+	Connection string `json:"connection" jsonschema:"Optional open connection name to target; defaults to the active connection"`
+}
 
 type sampleTableInput struct {
-	Schema string `json:"schema" jsonschema:"Schema name,required"`
-	Table  string `json:"table"  jsonschema:"Table name,required"`
-	Limit  int    `json:"limit"  jsonschema:"Number of rows to return (default 10, max 100)"`
+	Schema     string `json:"schema"     jsonschema:"Schema name,required"`
+	Table      string `json:"table"      jsonschema:"Table name,required"`
+	Limit      int    `json:"limit"      jsonschema:"Number of rows to return (default 10, max 100)"`
+	Connection string `json:"connection" jsonschema:"Optional open connection name to target; defaults to the active connection"`
 }
 
 type explainQueryInput struct {
-	Query   string `json:"query"   jsonschema:"SQL query to explain,required"`
-	Analyze bool   `json:"analyze" jsonschema:"If true, executes the query and includes runtime statistics"`
+	Query      string `json:"query"      jsonschema:"SQL query to explain,required"`
+	Analyze    bool   `json:"analyze"    jsonschema:"If true, executes the query and includes runtime statistics"`
+	Connection string `json:"connection" jsonschema:"Optional open connection name to target; defaults to the active connection"`
 }
+
+type listConnectionsInput struct{}
 
 type openQueryInTabInput struct {
 	Query string `json:"query" jsonschema:"SQL query to pre-fill in the editor,required"`
@@ -132,11 +149,25 @@ type updateQueryInTabInput struct {
 
 type getLastQueryResultInput struct{}
 
+func (s *Server) handleListConnections(
+	_ context.Context, _ *mcpsdk.CallToolRequest, _ listConnectionsInput,
+) (*mcpsdk.CallToolResult, any, error) {
+	log.Debug().Str("tool", "list_connections").Msg("MCP tool called")
+	if s.connections == nil {
+		return jsonResult([]ConnInfo{})
+	}
+	return jsonResult(s.connections.ListConnections())
+}
+
 func (s *Server) handleListSchemas(
 	ctx context.Context, _ *mcpsdk.CallToolRequest, input listSchemasInput,
 ) (*mcpsdk.CallToolResult, any, error) {
-	log.Debug().Str("tool", "list_schemas").Msg("MCP tool called")
-	schemas, err := s.driver.ListSchemas(ctx, input.Filter)
+	log.Debug().Str("tool", "list_schemas").Str("connection", input.Connection).Msg("MCP tool called")
+	driver, err := s.driverFor(input.Connection)
+	if err != nil {
+		return nil, nil, err
+	}
+	schemas, err := driver.ListSchemas(ctx, input.Filter)
 	if err != nil {
 		return nil, nil, fmt.Errorf("list_schemas: %w", err)
 	}
@@ -151,19 +182,24 @@ func (s *Server) handleDescribeTable(
 		return nil, nil, fmt.Errorf("schema and table are required")
 	}
 
-	cols, err := s.driver.GetTableColumns(ctx, input.Schema, input.Table)
+	driver, err := s.driverFor(input.Connection)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	cols, err := driver.GetTableColumns(ctx, input.Schema, input.Table)
 	if err != nil {
 		return nil, nil, fmt.Errorf("describe_table columns: %w", err)
 	}
-	constraints, err := s.driver.GetTableConstraints(ctx, input.Schema, input.Table)
+	constraints, err := driver.GetTableConstraints(ctx, input.Schema, input.Table)
 	if err != nil {
 		return nil, nil, fmt.Errorf("describe_table constraints: %w", err)
 	}
-	fks, err := s.driver.GetTableForeignKeys(ctx, input.Schema, input.Table)
+	fks, err := driver.GetTableForeignKeys(ctx, input.Schema, input.Table)
 	if err != nil {
 		return nil, nil, fmt.Errorf("describe_table foreign_keys: %w", err)
 	}
-	indexes, err := s.driver.GetIndexes(ctx, input.Schema, input.Table)
+	indexes, err := driver.GetIndexes(ctx, input.Schema, input.Table)
 	if err != nil {
 		return nil, nil, fmt.Errorf("describe_table indexes: %w", err)
 	}
@@ -191,7 +227,12 @@ func (s *Server) handleReadQuery(
 		}
 	}
 
-	rows, cols, err := s.driver.ExecuteQuery(ctx, input.Query)
+	driver, err := s.driverFor(input.Connection)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	rows, cols, err := driver.ExecuteQuery(ctx, input.Query)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read_query: %w", err)
 	}
@@ -221,15 +262,21 @@ func (s *Server) handleWriteQuery(
 		return nil, nil, fmt.Errorf("statement is required")
 	}
 
-	affected, err := s.driver.ExecuteStatement(ctx, input.Statement)
+	driver, err := s.driverFor(input.Connection)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	affected, err := driver.ExecuteStatement(ctx, input.Statement)
 	if err != nil {
 		return nil, nil, fmt.Errorf("write_query: %w", err)
 	}
 
 	if s.manager != nil {
 		s.manager.Broadcast(manager.NewQueryExecutedMsg(manager.QueryResult{
-			Query:    input.Statement,
-			Affected: affected,
+			Query:      input.Statement,
+			Affected:   affected,
+			Connection: s.resolveConnName(input.Connection),
 		}))
 	}
 
@@ -238,10 +285,14 @@ func (s *Server) handleWriteQuery(
 }
 
 func (s *Server) handleGetServerInfo(
-	ctx context.Context, _ *mcpsdk.CallToolRequest, _ getServerInfoInput,
+	ctx context.Context, _ *mcpsdk.CallToolRequest, input getServerInfoInput,
 ) (*mcpsdk.CallToolResult, any, error) {
-	log.Debug().Str("tool", "get_server_info").Msg("MCP tool called")
-	info, err := s.driver.GetServerInfo(ctx)
+	log.Debug().Str("tool", "get_server_info").Str("connection", input.Connection).Msg("MCP tool called")
+	driver, err := s.driverFor(input.Connection)
+	if err != nil {
+		return nil, nil, err
+	}
+	info, err := driver.GetServerInfo(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("get_server_info: %w", err)
 	}
@@ -249,16 +300,20 @@ func (s *Server) handleGetServerInfo(
 }
 
 func (s *Server) handleListEnumTypes(
-	ctx context.Context, _ *mcpsdk.CallToolRequest, _ listEnumTypesInput,
+	ctx context.Context, _ *mcpsdk.CallToolRequest, input listEnumTypesInput,
 ) (*mcpsdk.CallToolResult, any, error) {
-	log.Debug().Str("tool", "list_enum_types").Msg("MCP tool called")
+	log.Debug().Str("tool", "list_enum_types").Str("connection", input.Connection).Msg("MCP tool called")
+	driver, err := s.driverFor(input.Connection)
+	if err != nil {
+		return nil, nil, err
+	}
 	const q = `
 		SELECT t.typname AS type, e.enumlabel AS value
 		FROM pg_type t
 		JOIN pg_enum e ON e.enumtypid = t.oid
 		ORDER BY t.typname, e.enumsortorder`
 
-	rows, _, err := s.driver.ExecuteQuery(ctx, q)
+	rows, _, err := driver.ExecuteQuery(ctx, q)
 	if err != nil {
 		return nil, nil, fmt.Errorf("list_enum_types: %w", err)
 	}
@@ -300,8 +355,13 @@ func (s *Server) handleSampleTable(
 		limit = s.maxRows()
 	}
 
+	driver, err := s.driverFor(input.Connection)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	q := fmt.Sprintf("SELECT * FROM %s.%s LIMIT %d", input.Schema, input.Table, limit)
-	rows, cols, err := s.driver.ExecuteQuery(ctx, q)
+	rows, cols, err := driver.ExecuteQuery(ctx, q)
 	if err != nil {
 		return nil, nil, fmt.Errorf("sample_table: %w", err)
 	}
@@ -326,14 +386,16 @@ func (s *Server) handleExplainQuery(
 		return nil, nil, fmt.Errorf("query is required")
 	}
 
-	var (
-		plan string
-		err  error
-	)
+	driver, err := s.driverFor(input.Connection)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var plan string
 	if input.Analyze {
-		plan, err = s.driver.ExplainAnalyze(ctx, input.Query)
+		plan, err = driver.ExplainAnalyze(ctx, input.Query)
 	} else {
-		plan, err = s.driver.ExplainPlan(ctx, input.Query)
+		plan, err = driver.ExplainPlan(ctx, input.Query)
 	}
 	if err != nil {
 		return nil, nil, fmt.Errorf("explain_query: %w", err)

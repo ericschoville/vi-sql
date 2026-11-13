@@ -222,7 +222,7 @@ func (s *SchemaTree) handleEvents() {
 			s.refreshStyle()
 		case manager.QueryExecuted:
 			result, ok := event.Message.Data.(manager.QueryResult)
-			if !ok || !isDDLQuery(result.Query) {
+			if !ok || !shouldReloadTree(result, s.App.GetConfig().CurrentConnection) {
 				return
 			}
 			go s.App.Application.QueueUpdateDraw(func() {
@@ -326,22 +326,42 @@ func lastVisibleTreeNode(node *tview.TreeNode) *tview.TreeNode {
 
 // Must be called from the tview goroutine — expandedSchemas/currentSelection are not goroutine-safe.
 func (s *SchemaTree) reloadTree(ctx context.Context) {
+	// Capture driver/tree state on the event loop; the goroutine only does the DB
+	// fetch, then applies everything back on the event loop via QueueUpdateDraw.
+	driver := s.Driver
 	expanded := s.expandedSchemas()
 	sel := s.currentSelection()
 	go func() {
-		if err := s.ListSchemas(ctx); err != nil {
+		schemas, err := driver.ListSchemas(ctx, "")
+		if err != nil {
 			return
 		}
 		s.App.Application.QueueUpdateDraw(func() {
+			s.applySchemas(schemas)
 			s.restoreAfterReload(expanded, sel)
 		})
 	}()
 }
 
 func (s *SchemaTree) restoreAfterReload(expanded map[string]bool, sel treeSelection) {
+	// Preserve focus: a background reload (DDL broadcast, connection switch) must
+	// not yank focus to the tree via renderLayout's SetFocusOnly.
+	focus := s.App.GetFocus()
 	s.renderWithActiveFilter()
 	s.restoreExpanded(expanded)
 	s.restoreSelection(sel)
+	if focus != nil {
+		s.App.SetFocusOnly(focus)
+	}
+}
+
+// shouldReloadTree reports whether a QueryExecuted broadcast warrants a reload:
+// only DDL, and only for the active/local connection (empty Connection = local).
+func shouldReloadTree(result manager.QueryResult, activeConn string) bool {
+	if !isDDLQuery(result.Query) {
+		return false
+	}
+	return result.Connection == "" || result.Connection == activeConn
 }
 
 func isDDLQuery(sql string) bool {
@@ -369,6 +389,20 @@ func (s *SchemaTree) Render() {
 
 	s.renderTree(s.schemas, false)
 	s.renderLayout()
+}
+
+// SwitchToCached renders the tree from a connection's cached schemas without a
+// driver round-trip (instant), then refreshes from the driver in the background.
+// Used on connection switch to keep the UI responsive; pass nil when the target
+// connection's schemas aren't cached yet.
+func (s *SchemaTree) SwitchToCached(cached []database.Schema) {
+	s.schemas = cached
+	if s.onSchemasLoaded != nil {
+		s.onSchemasLoaded(cached)
+	}
+	s.renderTree(s.schemas, false)
+	s.renderLayout()
+	s.reloadTree(context.Background())
 }
 
 func (s *SchemaTree) renderTree(schemas []database.Schema, expand bool) {
@@ -468,11 +502,18 @@ func (s *SchemaTree) ListSchemas(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	s.applySchemas(schemas)
+	return nil
+}
+
+// applySchemas stores freshly loaded schemas and notifies listeners. It mutates
+// shared state (s.schemas, the onSchemasLoaded callback), so it must run on the
+// event loop — never directly from a background reload goroutine.
+func (s *SchemaTree) applySchemas(schemas []database.Schema) {
 	s.schemas = schemas
 	if s.onSchemasLoaded != nil {
 		s.onSchemasLoaded(schemas)
 	}
-	return nil
 }
 
 func (s *SchemaTree) rootNode() *tview.TreeNode {

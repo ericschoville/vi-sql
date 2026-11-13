@@ -49,6 +49,24 @@ type Main struct {
 	goToObjectModal *modal.GoToObjectModal
 	renameModal     *core.InputField
 	updateHandler   func()
+	// workspaces holds each open connection's tab state, keyed by connection
+	// name, so switching connections preserves rather than discards tabs.
+	// activeConn is the name of the connection whose workspace is live in the
+	// m.* fields above.
+	workspaces map[string]*workspace
+	activeConn string
+}
+
+// workspace is the per-connection UI state swapped in and out of Main on a
+// connection switch.
+type workspace struct {
+	tabBar            *widget.TabBar
+	queryTabs         []*component.Data
+	structureTabs     map[string]*component.Structure
+	viewStructureTabs map[string]*component.Structure
+	indexTabs         map[string]*component.Indexes
+	queryTabNums      map[int]bool
+	lastSchemas       []database.Schema
 }
 
 func NewMain() *Main {
@@ -63,6 +81,7 @@ func NewMain() *Main {
 		viewStructureTabs: make(map[string]*component.Structure),
 		indexTabs:         make(map[string]*component.Indexes),
 		queryTabNums:      make(map[int]bool),
+		workspaces:        make(map[string]*workspace),
 		actionsModal:      modal.NewActionsModal(),
 		importModal:       modal.NewImportModal(),
 		serverInfoModal:   modal.NewServerInfoModal(),
@@ -381,27 +400,128 @@ func (m *Main) closeActiveTab() {
 	m.setFocusToActiveTab()
 }
 
-func (m *Main) UpdateDriver(driver database.Driver) {
+// SwitchToConnection makes name the active connection: it stashes the current
+// connection's tabs, points the chrome (schema tree, footer, top bar) at the
+// new driver, and restores name's tabs — or starts a fresh workspace with a
+// single blank query tab if name hasn't been opened in this session before.
+func (m *Main) SwitchToConnection(name string, driver database.Driver) {
+	if name == m.activeConn {
+		return
+	}
+	m.saveActiveWorkspace()
+	// Drop the outgoing workspace's tabs so MCP tab tools can't reach a tab that
+	// isn't currently visible; the incoming workspace re-registers below.
+	m.unregisterActiveTabs()
+
+	// Chrome always follows the active connection.
 	m.BaseElement.UpdateDriver(driver)
 	m.schemas.UpdateDriver(driver)
 	m.footer.UpdateDriver(driver)
 	m.topBar.UpdateDriver(driver)
 
-	for _, tab := range m.queryTabs {
-		tab.UpdateDriver(driver)
-		tab.Reset()
+	if ws, ok := m.workspaces[name]; ok {
+		m.loadWorkspace(ws)
+		m.registerActiveTabs()
+		m.activeConn = name
+		m.topBar.ResetRendered()
+		m.topBar.Render()
+		// Render from the connection's cached schemas instantly, refresh in the
+		// background — a synchronous ListSchemas here would freeze the switch.
+		m.schemas.SwitchToCached(m.lastSchemas)
+		m.rebuildInnerFlex()
+		m.setFocusToActiveTab()
+	} else {
+		m.resetActiveWorkspace()
+		m.activeConn = name
+		m.topBar.ResetRendered()
+		m.topBar.Render()
+		m.schemas.SwitchToCached(m.lastSchemas)
+		m.openNewQueryTab()
+		m.App.SetFocus(m.schemas)
 	}
-	// Remove all existing tabs; the user starts fresh with the new connection.
-	m.queryTabs = m.queryTabs[:0]
-	m.queryTabNums = make(map[int]bool)
+
+	if m.updateHandler != nil {
+		m.topBar.SetUpdateAvailable()
+	}
+}
+
+// saveActiveWorkspace snapshots the live tab state into the active connection's
+// workspace so it can be restored later.
+func (m *Main) saveActiveWorkspace() {
+	if m.activeConn == "" {
+		return
+	}
+	m.workspaces[m.activeConn] = &workspace{
+		tabBar:            m.topBar.TabBar(),
+		queryTabs:         m.queryTabs,
+		structureTabs:     m.structureTabs,
+		viewStructureTabs: m.viewStructureTabs,
+		indexTabs:         m.indexTabs,
+		queryTabNums:      m.queryTabNums,
+		lastSchemas:       m.lastSchemas,
+	}
+}
+
+// loadWorkspace makes ws the live tab state.
+func (m *Main) loadWorkspace(ws *workspace) {
+	m.topBar.SetTabBar(ws.tabBar)
+	m.queryTabs = ws.queryTabs
+	m.structureTabs = ws.structureTabs
+	m.viewStructureTabs = ws.viewStructureTabs
+	m.indexTabs = ws.indexTabs
+	m.queryTabNums = ws.queryTabNums
+	m.lastSchemas = ws.lastSchemas
+}
+
+// unregisterActiveTabs removes the live workspace's query tabs from the shared
+// TabRegistry so MCP tab tools stop resolving tabs that are no longer visible.
+func (m *Main) unregisterActiveTabs() {
+	if m.tabRegistry == nil {
+		return
+	}
+	for id := range m.topBar.TabBar().DynamicQueryTabs() {
+		m.tabRegistry.Unregister(id)
+	}
+}
+
+// registerActiveTabs (re)registers the live workspace's query tabs with the
+// shared TabRegistry after it becomes active.
+func (m *Main) registerActiveTabs() {
+	if m.tabRegistry == nil {
+		return
+	}
+	for id, prim := range m.topBar.TabBar().DynamicQueryTabs() {
+		tab, ok := prim.(*component.Data)
+		if !ok {
+			continue
+		}
+		m.tabRegistry.Register(id, tab.GetEditorText)
+		m.tabRegistry.RegisterSetter(id, tab.SetEditorText)
+	}
+}
+
+// resetActiveWorkspace clears the live tab state for a brand-new connection.
+func (m *Main) resetActiveWorkspace() {
+	m.topBar.SetTabBar(widget.NewTabBar())
+	m.queryTabs = nil
 	m.structureTabs = make(map[string]*component.Structure)
 	m.viewStructureTabs = make(map[string]*component.Structure)
 	m.indexTabs = make(map[string]*component.Indexes)
-	m.topBar.ClearAllTabs()
+	m.queryTabNums = make(map[int]bool)
+	m.lastSchemas = nil
+}
 
-	m.topBar.ResetRendered()
-	m.topBar.Render()
-	m.rebuildInnerFlex()
+// DropWorkspace discards a closed connection's saved tab state. If the closed
+// connection was active, activeConn is cleared so the next SwitchToConnection
+// discards (rather than re-saves) its now-defunct tabs.
+func (m *Main) DropWorkspace(name string) {
+	delete(m.workspaces, name)
+	if name == m.activeConn {
+		// The active workspace's tabs live on the current tab bar and are still
+		// in the registry; non-active ones were unregistered on switch-away.
+		m.unregisterActiveTabs()
+		m.activeConn = ""
+	}
 }
 
 func (m *Main) SetUpdateHandler(fn func()) {
@@ -443,6 +563,9 @@ func (m *Main) render() {
 	if m.footerHeight == 0 {
 		m.footerHeight = 2
 	}
+
+	// Track the first connection's workspace so later switches preserve it.
+	m.activeConn = m.App.GetConfig().CurrentConnection
 
 	// Start with a single blank query tab.
 	m.openNewQueryTab()
@@ -639,6 +762,11 @@ func (m *Main) openActionsModal() {
 			Handler: m.App.OpenConnectionPage,
 		},
 		{
+			Label:   "Switch connection",
+			KeyHint: k.Global.SwitchConnection.String(),
+			Handler: m.App.OpenConnSwitcher,
+		},
+		{
 			Label:   mcpLabel,
 			Handler: m.App.ToggleMCP,
 		},
@@ -702,7 +830,8 @@ func (m *Main) openActionsModal() {
 				Handler: func() { m.openViewStructureTab(ctx, schema, name) },
 			})
 		} else {
-			entries = append(entries,
+			entries = append(
+				entries,
 				modal.ActionEntry{
 					Label:   "Structure",
 					KeyHint: k.Main.OpenStructure.String(),
@@ -727,7 +856,8 @@ func (m *Main) openActionsModal() {
 			historyHandler = func() { data.OpenHistoryWithCallback(func(q string) { m.openNewQueryTabWithQuery(q, true) }) }
 		}
 
-		entries = append(entries,
+		entries = append(
+			entries,
 			modal.ActionEntry{
 				Label:    "Count rows",
 				Handler:  func() { data.RunCount() },

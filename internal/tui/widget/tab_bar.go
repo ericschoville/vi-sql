@@ -95,6 +95,18 @@ func (t *TabBar) AddDynamicTabWithID(name, tabID string, kind TabKind, component
 	return t.active
 }
 
+// DynamicQueryTabs maps tabID to component for every query tab carrying an
+// MCP-assigned ID, so callers can (de)register them on a connection switch.
+func (t *TabBar) DynamicQueryTabs() map[string]TabBarPrimitive {
+	out := make(map[string]TabBarPrimitive)
+	for _, tab := range t.tabs {
+		if tab.kind == KindQuery && tab.tabID != "" {
+			out[tab.tabID] = tab.primitive
+		}
+	}
+	return out
+}
+
 // GetActiveTabID returns the MCP-assigned tabID of the active tab, or empty string.
 func (t *TabBar) GetActiveTabID() string {
 	if t.active < len(t.tabs) {

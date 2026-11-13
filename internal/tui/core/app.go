@@ -16,6 +16,8 @@ type App struct {
 	Pages                *Pages
 	driver               database.Driver
 	formatter            database.ValueFormatter
+	openConns            map[string]*OpenConn
+	connOrder            []string
 	manager              *manager.ElementManager
 	styles               *config.Styles
 	config               *config.Config
@@ -27,6 +29,7 @@ type App struct {
 	screen               tcell.Screen
 	openStyleModal       func()
 	openConnectionPage   func()
+	openConnSwitcher     func()
 	openOptionsPage      func()
 	toggleMCP            func()
 }
@@ -53,6 +56,14 @@ func (a *App) SetOpenConnectionPageFunc(fn func()) { a.openConnectionPage = fn }
 func (a *App) OpenConnectionPage() {
 	if a.openConnectionPage != nil {
 		a.openConnectionPage()
+	}
+}
+
+func (a *App) SetOpenConnSwitcherFunc(fn func()) { a.openConnSwitcher = fn }
+
+func (a *App) OpenConnSwitcher() {
+	if a.openConnSwitcher != nil {
+		a.openConnSwitcher()
 	}
 }
 

@@ -3,7 +3,9 @@ package component
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/kopecmaciej/tview"
 	"github.com/kopecmaciej/vi-sql/internal/database"
@@ -34,13 +36,15 @@ type TopBar struct {
 	*core.BaseElement
 	*core.Flex
 
-	tabBar      *widget.TabBar
-	connText    *tview.TextView
-	mcpText     *tview.TextView
-	vimText     *tview.TextView
-	updateText  *tview.TextView
-	health      healthState
-	stopMonitor context.CancelFunc
+	tabBar          *widget.TabBar
+	connText        *tview.TextView
+	mcpText         *tview.TextView
+	vimText         *tview.TextView
+	updateText      *tview.TextView
+	healthMu        sync.Mutex
+	health          healthState
+	stopMonitor     context.CancelFunc
+	updateAvailable bool
 }
 
 func NewTopBar() *TopBar {
@@ -75,30 +79,53 @@ func (t *TopBar) init() error {
 	t.Flex.SetBorder(true)
 	t.setStyle()
 
+	t.layout()
+
+	t.handleEvents()
+	t.startHealthMonitor(t.Driver)
+	return nil
+}
+
+// layout (re)builds the top bar's column flex around the current tab bar.
+func (t *TopBar) layout() {
+	t.Flex.Clear()
 	t.Flex.AddItem(t.tabBar, 0, 1, false)
-	t.Flex.AddItem(t.updateText, 0, 0, false)
+	updateWidth := 0
+	if t.updateAvailable {
+		updateWidth = defaultIndicatorWidth
+	}
+	t.Flex.AddItem(t.updateText, updateWidth, 0, false)
 	t.Flex.AddItem(t.vimText, defaultIndicatorWidth, 0, false)
 	t.Flex.AddItem(t.mcpText, defaultIndicatorWidth, 0, false)
 	t.Flex.AddItem(t.connText, connInfoWidth, 0, false)
+}
 
-	t.handleEvents()
-	t.startHealthMonitor()
-	return nil
+// TabBar returns the active tab bar, so callers can stash it per connection.
+func (t *TopBar) TabBar() *widget.TabBar { return t.tabBar }
+
+// SetTabBar swaps in a different tab bar (used to restore a connection's tabs)
+// and rebuilds the layout around it.
+func (t *TopBar) SetTabBar(tabBar *widget.TabBar) {
+	t.tabBar = tabBar
+	t.tabBar.SetStyle(t.App.GetStyles())
+	t.layout()
 }
 
 // UpdateDriver overrides BaseElement.UpdateDriver to restart the health monitor
 // when a new database connection is established.
 func (t *TopBar) UpdateDriver(driver database.Driver) {
 	t.BaseElement.UpdateDriver(driver)
-	t.health = healthState{}
-	t.startHealthMonitor()
+	t.setHealth(healthState{})
+	t.startHealthMonitor(driver)
 }
 
-func (t *TopBar) startHealthMonitor() {
+// startHealthMonitor restarts the monitor for driver. driver is passed into each
+// ping so the goroutine never reads t.Driver, which races with a connection switch.
+func (t *TopBar) startHealthMonitor(driver database.Driver) {
 	if t.stopMonitor != nil {
 		t.stopMonitor()
 	}
-	if t.Driver == nil {
+	if driver == nil {
 		return
 	}
 
@@ -106,7 +133,7 @@ func (t *TopBar) startHealthMonitor() {
 	t.stopMonitor = cancel
 
 	go func() {
-		t.doPing(ctx)
+		t.doPing(ctx, driver)
 
 		ticker := time.NewTicker(pingInterval)
 		defer ticker.Stop()
@@ -115,28 +142,40 @@ func (t *TopBar) startHealthMonitor() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				t.doPing(ctx)
+				t.doPing(ctx, driver)
 			}
 		}
 	}()
 }
 
-func (t *TopBar) doPing(ctx context.Context) {
+func (t *TopBar) doPing(ctx context.Context, driver database.Driver) {
 	pingCtx, cancel := context.WithTimeout(ctx, pingTimeout)
 	defer cancel()
 
 	start := time.Now()
-	err := t.Driver.Ping(pingCtx)
+	err := driver.Ping(pingCtx)
 	latency := time.Since(start)
 
-	t.health = healthState{
+	t.setHealth(healthState{
 		checked:   true,
 		connected: err == nil,
 		latency:   latency,
-	}
+	})
 	t.App.QueueUpdateDraw(func() {
 		t.updateConnText()
 	})
+}
+
+func (t *TopBar) setHealth(h healthState) {
+	t.healthMu.Lock()
+	t.health = h
+	t.healthMu.Unlock()
+}
+
+func (t *TopBar) getHealth() healthState {
+	t.healthMu.Lock()
+	defer t.healthMu.Unlock()
+	return t.health
 }
 
 func (t *TopBar) setStyle() {
@@ -154,6 +193,7 @@ func (t *TopBar) setStyle() {
 func (t *TopBar) SetUpdateAvailable() {
 	g := t.App.GetStyles().Global
 	sym := t.App.GetStyles().Icons
+	t.updateAvailable = true
 	t.updateText.SetText(fmt.Sprintf("[%s]%s[-]", g.WarningColor, string(sym.Update)))
 	t.Flex.ResizeItem(t.updateText, defaultIndicatorWidth, 0)
 }
@@ -162,24 +202,33 @@ func (t *TopBar) updateConnText() {
 	g := t.App.GetStyles().Global
 	sym := t.App.GetStyles().Icons
 
-	if t.App.GetConfig().GetCurrentConnection() == nil {
+	conn := t.App.GetConfig().GetCurrentConnection()
+	if conn == nil {
 		t.connText.SetText(fmt.Sprintf("[%s]%s ----[-] ", g.ErrorColor, string(sym.HealthDown)))
+		t.Flex.ResizeItem(t.connText, connInfoWidth, 0)
 		return
 	}
 
 	indicator := fmt.Sprintf("[%s]%s[-]", g.DimColor, string(sym.HealthDown))
 	extra := ""
+	plain := 1 // health indicator glyph
 
-	if t.health.checked {
-		if t.health.connected {
+	health := t.getHealth()
+	if health.checked {
+		if health.connected {
 			indicator = fmt.Sprintf("[%s]%s[-]", g.SuccessColor, string(sym.HealthUp))
-			extra = fmt.Sprintf(" [%s]%s[-]", g.DimColor, formatPingLatency(t.health.latency))
+			latency := formatPingLatency(health.latency)
+			extra = fmt.Sprintf(" [%s]%s[-]", g.DimColor, latency)
+			plain += 1 + utf8.RuneCountInString(latency)
 		} else {
 			indicator = fmt.Sprintf("[%s]%s[-]", g.ErrorColor, string(sym.HealthDown))
 		}
 	}
 
-	t.connText.SetText(fmt.Sprintf("%s%s ", indicator, extra))
+	name := conn.Name
+	t.connText.SetText(fmt.Sprintf("[%s]%s[-] %s%s ", g.SecondaryTextColor, name, indicator, extra))
+	width := max(utf8.RuneCountInString(name)+2+plain, connInfoWidth)
+	t.Flex.ResizeItem(t.connText, width, 0)
 }
 
 func (t *TopBar) updateMCPText() {

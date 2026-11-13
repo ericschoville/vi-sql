@@ -34,3 +34,29 @@ func TestTabBar_SwitchToTabByName(t *testing.T) {
 		})
 	}
 }
+
+func TestTabBar_DynamicQueryTabs(t *testing.T) {
+	bar := NewTabBar()
+	q1 := &mockPrimitive{}
+	q2 := &mockPrimitive{}
+	// Query tabs with MCP IDs — the only ones that should be returned.
+	bar.AddDynamicTabWithID("Query 1", "tab-1", KindQuery, q1)
+	bar.AddDynamicTabWithID("Query 2", "tab-2", KindQuery, q2)
+	// Query tab without an ID — not MCP-addressable, must be excluded.
+	bar.AddDynamicTab("Query 3", &mockPrimitive{}, KindQuery)
+	// Non-query tab with an ID — wrong kind, must be excluded.
+	bar.AddDynamicTabWithID("users", "tab-struct", KindStructure, &mockPrimitive{})
+
+	got := bar.DynamicQueryTabs()
+
+	assert.Len(t, got, 2)
+	assert.Same(t, q1, got["tab-1"])
+	assert.Same(t, q2, got["tab-2"])
+	assert.NotContains(t, got, "tab-struct")
+}
+
+func TestTabBar_DynamicQueryTabs_Empty(t *testing.T) {
+	bar := NewTabBar()
+	bar.AddTab("users", &mockPrimitive{}, KindStructure, true)
+	assert.Empty(t, bar.DynamicQueryTabs())
+}

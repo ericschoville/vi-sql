@@ -30,6 +30,7 @@ type App struct {
 	connection     *page.Connection
 	main           *page.Main
 	help           *page.Help
+	connSwitcher   *modal.ConnectionSwitcher
 	mcpCancelFunc  context.CancelFunc
 	tabRegistry    *manager.TabRegistry
 	currentFocusID string
@@ -43,11 +44,12 @@ func NewApp(appConfig *config.Config) *App {
 	mainPage.SetRegistry(reg)
 
 	app := &App{
-		App:         coreApp,
-		connection:  page.NewConnection(),
-		main:        mainPage,
-		help:        page.NewHelp(),
-		tabRegistry: reg,
+		App:          coreApp,
+		connection:   page.NewConnection(),
+		main:         mainPage,
+		help:         page.NewHelp(),
+		connSwitcher: modal.NewConnectionSwitcher(),
+		tabRegistry:  reg,
 	}
 
 	return app
@@ -59,11 +61,15 @@ func (a *App) Init() error {
 
 	a.App.SetOpenStyleModalFunc(a.ShowStyleChangeModal)
 	a.App.SetOpenConnectionPageFunc(a.renderConnection)
+	a.App.SetOpenConnSwitcherFunc(a.openConnectionSwitcher)
 	a.App.SetOpenOptionsPageFunc(a.renderOptions)
 	a.App.SetToggleMCPFunc(a.toggleMCPServer)
 
 	err := a.help.Init(a.App)
 	if err != nil {
+		return err
+	}
+	if err := a.connSwitcher.Init(a.App); err != nil {
 		return err
 	}
 	go a.handleEvents()
@@ -86,11 +92,7 @@ func (a *App) shutdown() {
 		log.Debug().Msg("MCP server stopped")
 	}
 
-	if driver := a.GetDriver(); driver != nil {
-		if err := driver.Close(context.Background()); err != nil {
-			log.Error().Err(err).Msg("Failed to close database connection")
-		}
-	}
+	a.App.CloseAllConns(context.Background())
 
 	a.GetManager().Stop()
 	log.Debug().Msg("Event manager stopped")
@@ -143,6 +145,9 @@ func (a *App) setKeybindings() {
 			return nil
 		case k.Match(k.Global.OpenConnection, event):
 			a.renderConnection()
+			return nil
+		case k.Match(k.Global.SwitchConnection, event):
+			a.openConnectionSwitcher()
 			return nil
 		case k.Match(k.Global.ChangeStyle, event):
 			a.ShowStyleChangeModal()
@@ -230,8 +235,13 @@ func (a *App) connectToDatabase() error {
 		return nil
 	}
 
-	if old := a.App.GetDriver(); old != nil {
-		_ = old.Close(context.Background())
+	// Reuse an already-open connection instead of reconnecting, leaving every
+	// other open connection untouched.
+	if oc, ok := a.App.GetOpenConn(currConn.Name); ok {
+		a.SetDriver(oc.Driver)
+		a.SetFormatter(oc.Formatter)
+		a.ensureMCPServer()
+		return nil
 	}
 
 	driver, formatter, err := database.NewDriver(currConn)
@@ -243,14 +253,26 @@ func (a *App) connectToDatabase() error {
 	if currConn.GetOptions().ReadOnly {
 		driver = database.NewReadOnlyDriver(driver)
 	}
+
+	a.App.AddOpenConn(&core.OpenConn{Config: currConn, Driver: driver, Formatter: formatter})
 	a.SetDriver(driver)
 	a.SetFormatter(formatter)
 
-	a.startMCPServer(driver)
+	a.ensureMCPServer()
 	return nil
 }
 
-func (a *App) startMCPServer(driver database.Driver) {
+// ensureMCPServer starts the MCP server if it's enabled and not already running.
+// The server resolves connections live, so it does not need to restart when the
+// active connection changes.
+func (a *App) ensureMCPServer() {
+	if !a.App.GetConfig().MCP.Enabled || a.mcpCancelFunc != nil {
+		return
+	}
+	a.startMCPServer()
+}
+
+func (a *App) startMCPServer() {
 	cfg := a.App.GetConfig().MCP
 	if !cfg.Enabled {
 		return
@@ -263,7 +285,7 @@ func (a *App) startMCPServer(driver database.Driver) {
 	ctx, cancel := context.WithCancel(context.Background())
 	a.mcpCancelFunc = cancel
 
-	srv := visqlmcp.New(driver, cfg, a.App.GetManager(), a.tabRegistry)
+	srv := visqlmcp.New(mcpConnResolver{app: a.App}, cfg, a.App.GetManager(), a.tabRegistry)
 	go func() {
 		if err := srv.Start(ctx); err != nil {
 			log.Error().Err(err).Msg("MCP server error")
@@ -280,9 +302,7 @@ func (a *App) toggleMCPServer() {
 	_ = cfg.UpdateConfig()
 
 	if cfg.MCP.Enabled {
-		if a.App.GetDriver() != nil {
-			a.startMCPServer(a.App.GetDriver())
-		}
+		a.startMCPServer()
 	} else {
 		if a.mcpCancelFunc != nil {
 			a.mcpCancelFunc()
@@ -291,6 +311,89 @@ func (a *App) toggleMCPServer() {
 		a.App.SetMCPEnabled(false)
 		a.App.GetManager().Broadcast(manager.NewMCPStateChangedMsg(false))
 	}
+}
+
+// openConnectionSwitcher shows the list of currently open connections so the
+// user can jump between or close them.
+func (a *App) openConnectionSwitcher() {
+	if a.main.App == nil {
+		return
+	}
+	conns := a.App.OpenConns()
+	if len(conns) == 0 {
+		return
+	}
+	active := a.GetConfig().CurrentConnection
+	entries := make([]modal.ConnEntry, 0, len(conns))
+	for _, oc := range conns {
+		entries = append(entries, modal.ConnEntry{
+			Name:   oc.Config.Name,
+			Detail: connDetail(oc.Config),
+			Active: oc.Config.Name == active,
+		})
+	}
+	a.connSwitcher.Open(entries, a.switchToOpenConnection, a.closeConnection)
+}
+
+// connDetail builds the dimmed right-hand description shown in the switcher.
+func connDetail(cfg *config.SQLConfig) string {
+	target := cfg.Database
+	if target == "" {
+		target = cfg.Host
+	}
+	if target == "" {
+		return cfg.GetDriver()
+	}
+	return fmt.Sprintf("%s · %s", cfg.GetDriver(), target)
+}
+
+// switchToOpenConnection makes an already-open connection active.
+func (a *App) switchToOpenConnection(name string) {
+	if name == a.GetConfig().CurrentConnection {
+		return
+	}
+	if err := a.GetConfig().SetCurrentConnection(name); err != nil {
+		modal.ShowError(a.Pages, "Failed to switch connection", err)
+		return
+	}
+	if err := a.connectToDatabase(); err != nil {
+		modal.ShowError(a.Pages, "Failed to switch connection", err)
+		return
+	}
+	a.main.SwitchToConnection(name, a.GetDriver())
+}
+
+// closeConnection closes an open connection and discards its workspace. If the
+// closed connection was active, it falls back to another open connection, or to
+// the connection page when none remain.
+func (a *App) closeConnection(name string) {
+	wasActive := name == a.GetConfig().CurrentConnection
+
+	if err := a.App.CloseConn(context.Background(), name); err != nil {
+		log.Error().Err(err).Str("connection", name).Msg("Failed to close connection")
+	}
+	a.main.DropWorkspace(name)
+
+	if !wasActive {
+		return
+	}
+
+	conns := a.App.OpenConns()
+	if len(conns) == 0 {
+		a.GetConfig().CurrentConnection = ""
+		a.renderConnection()
+		return
+	}
+	next := conns[0].Config.Name
+	if err := a.GetConfig().SetCurrentConnection(next); err != nil {
+		modal.ShowError(a.Pages, "Failed to switch connection", err)
+		return
+	}
+	if err := a.connectToDatabase(); err != nil {
+		modal.ShowError(a.Pages, "Failed to switch connection", err)
+		return
+	}
+	a.main.SwitchToConnection(next, a.GetDriver())
 }
 
 func (a *App) Render() {
@@ -474,15 +577,14 @@ func (a *App) initAndRenderMain() {
 	}
 
 	if a.main.App != nil || a.main.Driver != nil {
-		a.main.UpdateDriver(a.GetDriver())
+		a.main.SwitchToConnection(a.GetConfig().CurrentConnection, a.GetDriver())
 	} else {
 		if err := a.main.Init(a.App); err != nil {
 			log.Fatal().Err(err).Msg("Error while initializing main view")
 			os.Exit(1)
 		}
+		a.main.Render()
 	}
-
-	a.main.Render()
 
 	if a.latestVersion != "" {
 		a.main.SetUpdateHandler(func() { a.startSelfUpdate(a.latestVersion) })
@@ -546,8 +648,8 @@ func (a *App) renderOptions() {
 	})
 	opts.SetOnSubmitFunc(func() {
 		a.Pages.RemovePage(opts.GetIdentifier())
-		if a.App.GetConfig().MCP.Enabled && a.App.GetDriver() != nil {
-			a.startMCPServer(a.App.GetDriver())
+		if a.App.GetConfig().MCP.Enabled {
+			a.startMCPServer()
 		}
 		if err := a.App.ReloadKeybindings(); err != nil {
 			log.Error().Err(err).Msg("Failed to reload keybindings")

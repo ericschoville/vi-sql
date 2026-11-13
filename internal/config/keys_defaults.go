@@ -95,6 +95,10 @@ func (k *KeyBindings) loadDefaults(vimMode bool) {
 			Keys:        []string{"Ctrl+o"},
 			Description: "Open connections",
 		},
+		SwitchConnection: Key{
+			Keys:        []string{"Alt+o"},
+			Description: "Switch open connection",
+		},
 		ChangeStyle: Key{
 			Keys:        []string{"Alt+t"},
 			Description: "Change style",

@@ -53,6 +53,7 @@ type QueryResult struct {
 	RowCount   int              `json:"row_count"`
 	Affected   int64            `json:"affected_rows,omitempty"`
 	ExecutedAt *time.Time       `json:"executed_at,omitempty"`
+	Connection string           `json:"connection,omitempty"`
 }
 
 // FooterKeysOverride asks footer to show given keyset instead of deriving it

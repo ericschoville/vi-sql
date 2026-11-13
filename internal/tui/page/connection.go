@@ -299,7 +299,7 @@ func (c *Connection) computeContentWidth() int {
 
 		cells := []string{
 			fmt.Sprintf("%d", i+1),
-			conn.Name,
+			"  " + conn.Name, // leading open/active marker occupies two columns
 			hostPort,
 			database,
 			conn.GetDriver(),
@@ -375,7 +375,16 @@ func (c *Connection) renderTable() {
 		c.table.SetCell(row, 0, tview.NewTableCell(fmt.Sprintf(" %d ", i+1)).
 			SetStyle(tcell.StyleDefault.Foreground(dimColor).Background(bg)).
 			SetAlign(tview.AlignRight))
-		c.table.SetCell(row, 1, tview.NewTableCell(" "+conn.Name+" ").
+		// Mark open connections: ● for the active one, ○ for others held open.
+		marker := "  "
+		if c.App.IsConnOpen(conn.Name) {
+			if conn.Name == c.App.GetConfig().CurrentConnection {
+				marker = fmt.Sprintf("[%s]●[-] ", styles.Global.SecondaryTextColor)
+			} else {
+				marker = fmt.Sprintf("[%s]○[-] ", styles.Global.SuccessColor)
+			}
+		}
+		c.table.SetCell(row, 1, tview.NewTableCell(" "+marker+conn.Name+" ").
 			SetReference(conn.Name).
 			SetStyle(tcell.StyleDefault.Foreground(textColor).Background(bg)))
 		c.table.SetCell(row, 2, tview.NewTableCell(" "+hostPort+" ").

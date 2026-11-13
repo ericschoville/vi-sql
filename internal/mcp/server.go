@@ -9,7 +9,6 @@ import (
 
 	"github.com/kopecmaciej/vi-sql/internal/build"
 	"github.com/kopecmaciej/vi-sql/internal/config"
-	"github.com/kopecmaciej/vi-sql/internal/database"
 	"github.com/kopecmaciej/vi-sql/internal/manager"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/rs/zerolog/log"
@@ -17,7 +16,7 @@ import (
 
 // Server wraps the MCP SDK server and exposes database tools to MCP clients.
 type Server struct {
-	driver      database.Driver
+	connections ConnectionResolver
 	server      *mcpsdk.Server
 	cfg         config.MCPConfig
 	manager     *manager.ElementManager
@@ -27,9 +26,9 @@ type Server struct {
 	eventCh     chan manager.EventMsg
 }
 
-func New(driver database.Driver, cfg config.MCPConfig, mgr *manager.ElementManager, reg *manager.TabRegistry) *Server {
+func New(connections ConnectionResolver, cfg config.MCPConfig, mgr *manager.ElementManager, reg *manager.TabRegistry) *Server {
 	s := &Server{
-		driver:      driver,
+		connections: connections,
 		cfg:         cfg,
 		manager:     mgr,
 		tabRegistry: reg,

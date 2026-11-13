@@ -6,8 +6,10 @@ import (
 
 	"github.com/kopecmaciej/tview"
 	"github.com/kopecmaciej/vi-sql/internal/database"
+	"github.com/kopecmaciej/vi-sql/internal/manager"
 	"github.com/kopecmaciej/vi-sql/internal/testutil"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -407,4 +409,53 @@ func TestLastVisibleTreeNode_PartiallyCollapsed(t *testing.T) {
 	got := lastVisibleTreeNode(root)
 	assert.Equal(t, collapsed, got,
 		"last child is collapsed — should return it, not descend into its hidden children")
+}
+
+func TestShouldReloadTree(t *testing.T) {
+	tests := []struct {
+		name       string
+		query      string
+		conn       string // QueryResult.Connection (broadcast target)
+		activeConn string // the connection this tree is showing
+		want       bool
+	}{
+		{"ddl local (empty conn)", "CREATE TABLE t (id int)", "", "dars", true},
+		{"ddl matching active conn", "DROP TABLE t", "dars", "dars", true},
+		{"ddl other conn ignored", "ALTER TABLE t ADD COLUMN c int", "sis", "dars", false},
+		{"non-ddl local ignored", "SELECT * FROM t", "", "dars", false},
+		{"non-ddl matching conn ignored", "SELECT * FROM t", "dars", "dars", false},
+		{"rename is ddl", "RENAME TABLE a TO b", "dars", "dars", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := manager.QueryResult{Query: tt.query, Connection: tt.conn}
+			assert.Equal(t, tt.want, shouldReloadTree(result, tt.activeConn))
+		})
+	}
+}
+
+func TestSchemaTree_SwitchToCached_RendersWithoutBlockingOnDriver(t *testing.T) {
+	app, sim := testutil.NewTestApp(t)
+
+	// Driver whose ListSchemas blocks for the whole test: anything on screen must
+	// have come from the synchronous cache render, not the background refresh.
+	driver := &testutil.MockDriver{}
+	block := make(chan struct{})
+	t.Cleanup(func() { close(block) })
+	driver.On("CommonDataTypes").Return([]string{"TEXT"})
+	driver.On("ListSchemas", mock.Anything, "").
+		Run(func(mock.Arguments) { <-block }).
+		Return([]database.Schema(nil), nil)
+	app.SetDriver(driver)
+
+	tree := NewSchemaTree()
+	require.NoError(t, tree.Init(app))
+	app.SetRoot(tree, true)
+
+	tree.SwitchToCached([]database.Schema{{Schema: "cached_db", Tables: []string{"widgets"}}})
+	testutil.DrawAndSync(app, sim)
+
+	assert.True(t, testutil.ScreenContains(sim, "cached_db"),
+		"cached schema must render without waiting on the driver\nscreen:\n%v", testutil.ScreenFull(sim))
 }

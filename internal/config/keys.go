@@ -73,11 +73,12 @@ type (
 	}
 
 	GlobalKeys struct {
-		CloseApp       Key `yaml:"closeApp"`
-		FullScreenHelp Key `yaml:"fullScreenHelp"`
-		OpenConnection Key `yaml:"openConnection"`
-		ChangeStyle    Key `yaml:"changeStyle"`
-		ToggleFooter   Key `yaml:"togglefooter"`
+		CloseApp         Key `yaml:"closeApp"`
+		FullScreenHelp   Key `yaml:"fullScreenHelp"`
+		OpenConnection   Key `yaml:"openConnection"`
+		SwitchConnection Key `yaml:"switchConnection"`
+		ChangeStyle      Key `yaml:"changeStyle"`
+		ToggleFooter     Key `yaml:"togglefooter"`
 	}
 
 	MainKeys struct {
