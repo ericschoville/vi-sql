@@ -13,6 +13,10 @@ import (
 	_ "github.com/sijms/go-ora/v2"
 )
 
+// maxConnLifetime caps pooled-connection (and Oracle session) age so the 30s
+// health ping can't keep an idle session alive forever.
+const maxConnLifetime = 30 * time.Minute
+
 // Client wraps a database/sql connection to an Oracle database.
 type Client struct {
 	DB     *sql.DB
@@ -45,6 +49,7 @@ func (c *Client) Connect(ctx context.Context) error {
 		_ = db.Close()
 		return fmt.Errorf("failed to connect to Oracle: %w", err)
 	}
+	db.SetConnMaxLifetime(maxConnLifetime)
 	c.DB = db
 	return nil
 }
