@@ -1,6 +1,9 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -90,4 +93,60 @@ func TestIsPasswordReadable_PasswordCommand(t *testing.T) {
 	if !conn.IsPasswordReadable() {
 		t.Error("IsPasswordReadable should return true when PasswordCommand is set")
 	}
+}
+
+func TestPasswordCommandIsCached(t *testing.T) {
+	runs := filepath.Join(t.TempDir(), "runs")
+	conn := SQLConfig{PasswordCommand: "echo run >> " + runs + "; echo cachedpass"}
+	t.Cleanup(conn.ForgetPassword)
+
+	for range 3 {
+		got, err := conn.ResolvePassword()
+		if err != nil {
+			t.Fatalf("ResolvePassword() err = %v", err)
+		}
+		if got != "cachedpass" {
+			t.Fatalf("ResolvePassword() = %q, want cachedpass", got)
+		}
+	}
+	if count := countLines(t, runs); count != 1 {
+		t.Errorf("password command ran %d times, want 1", count)
+	}
+
+	conn.ForgetPassword()
+	if _, err := conn.ResolvePassword(); err != nil {
+		t.Fatalf("ResolvePassword() after ForgetPassword err = %v", err)
+	}
+	if count := countLines(t, runs); count != 2 {
+		t.Errorf("password command ran %d times after ForgetPassword, want 2", count)
+	}
+}
+
+func TestFailedPasswordCommandIsNotCached(t *testing.T) {
+	ready := filepath.Join(t.TempDir(), "ready")
+	conn := SQLConfig{PasswordCommand: "test -f " + ready + " && echo laterpass"}
+	t.Cleanup(conn.ForgetPassword)
+
+	if _, err := conn.ResolvePassword(); err == nil {
+		t.Fatal("ResolvePassword() succeeded before the command could, want an error")
+	}
+	if err := os.WriteFile(ready, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := conn.ResolvePassword()
+	if err != nil {
+		t.Fatalf("ResolvePassword() err = %v, want the failure not to be cached", err)
+	}
+	if got != "laterpass" {
+		t.Errorf("ResolvePassword() = %q, want laterpass", got)
+	}
+}
+
+func countLines(t *testing.T, path string) int {
+	t.Helper()
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Count(string(content), "\n")
 }
