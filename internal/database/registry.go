@@ -108,5 +108,10 @@ func NewDriver(cfg *config.SQLConfig) (Driver, ValueFormatter, error) {
 	if !ok {
 		return nil, nil, fmt.Errorf("unknown driver %q — did you import its package?", name)
 	}
-	return def.Factory(cfg)
+	driver, formatter, err := def.Factory(cfg)
+	if err != nil {
+		cfg.ForgetPassword()
+		return nil, nil, err
+	}
+	return driver, formatter, nil
 }

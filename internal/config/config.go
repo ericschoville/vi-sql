@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -23,6 +24,12 @@ const (
 )
 
 var LogPath = filepath.Join(os.TempDir(), "vi-sql.log")
+
+// passwordCache keeps command output so tools such as 1Password prompt once per command, not per connection.
+var passwordCache = struct {
+	sync.Mutex
+	values map[string]string
+}{values: map[string]string{}}
 
 type SQLOptions struct {
 	AlwaysConfirmActions *bool  `yaml:"alwaysConfirmActions,omitempty"`
@@ -488,6 +495,12 @@ func (m *SQLConfig) ResolvePassword() (string, error) {
 }
 
 func (m *SQLConfig) runPasswordCommand() (string, error) {
+	passwordCache.Lock()
+	defer passwordCache.Unlock()
+	if password, ok := passwordCache.values[m.PasswordCommand]; ok {
+		return password, nil
+	}
+
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
 		cmd = exec.Command("cmd", "/c", m.PasswordCommand)
@@ -503,7 +516,16 @@ func (m *SQLConfig) runPasswordCommand() (string, error) {
 		}
 		return "", fmt.Errorf("password command %q failed: %w", m.PasswordCommand, err)
 	}
-	return strings.TrimSpace(string(out)), nil
+	password := strings.TrimSpace(string(out))
+	passwordCache.values[m.PasswordCommand] = password
+	return password, nil
+}
+
+// ForgetPassword drops the cached password command output, so the next connection runs the command again.
+func (m *SQLConfig) ForgetPassword() {
+	passwordCache.Lock()
+	defer passwordCache.Unlock()
+	delete(passwordCache.values, m.PasswordCommand)
 }
 
 // ValidatePasswordCommand rejects a password command that can't be used: one set
