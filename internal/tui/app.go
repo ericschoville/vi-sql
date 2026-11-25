@@ -78,6 +78,7 @@ func (a *App) Init() error {
 	if err := a.connection.Init(a.App); err != nil {
 		return err
 	}
+	a.connection.SetOnCloseConnFunc(a.closeConnection)
 	return nil
 }
 
@@ -327,9 +328,10 @@ func (a *App) openConnectionSwitcher() {
 	entries := make([]modal.ConnEntry, 0, len(conns))
 	for _, oc := range conns {
 		entries = append(entries, modal.ConnEntry{
-			Name:   oc.Config.Name,
-			Detail: connDetail(oc.Config),
-			Active: oc.Config.Name == active,
+			Name:     oc.Config.Name,
+			Detail:   connDetail(oc.Config),
+			Active:   oc.Config.Name == active,
+			ReadOnly: oc.Config.GetOptions().ReadOnly,
 		})
 	}
 	a.connSwitcher.Open(entries, a.switchToOpenConnection, a.closeConnection)
@@ -606,7 +608,7 @@ func (a *App) renderConnection() {
 		a.initAndRenderMain()
 	})
 
-	if a.main.App != nil {
+	if a.main.App != nil && len(a.App.OpenConns()) > 0 {
 		a.connection.SetOnCancelFunc(func() {
 			a.Pages.RemovePage(a.connection.GetIdentifier())
 		})

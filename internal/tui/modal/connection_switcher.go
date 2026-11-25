@@ -1,19 +1,25 @@
 package modal
 
 import (
+	"fmt"
+
 	"github.com/gdamore/tcell/v2"
 	"github.com/kopecmaciej/tview"
 	"github.com/kopecmaciej/vi-sql/internal/manager"
 	"github.com/kopecmaciej/vi-sql/internal/tui/core"
 )
 
-const ConnectionSwitcherId = "ConnectionSwitcher"
+const (
+	ConnectionSwitcherId = "ConnectionSwitcher"
+	ReadOnlyMarker       = "⊘"
+)
 
 // ConnEntry is a single open connection shown in the switcher.
 type ConnEntry struct {
-	Name   string
-	Detail string
-	Active bool
+	Name     string
+	Detail   string
+	Active   bool
+	ReadOnly bool
 }
 
 // ConnectionSwitcher is a list of the currently open connections. Enter
@@ -141,7 +147,11 @@ func (c *ConnectionSwitcher) renderList() {
 			marker = "● "
 			nameColor = styles.Global.SecondaryTextColor.Color()
 		}
-		c.list.SetCell(i, 0, tview.NewTableCell(marker+e.Name).
+		name := marker + e.Name
+		if e.ReadOnly {
+			name += fmt.Sprintf(" [%s]%s[-]", styles.Global.WarningColor, ReadOnlyMarker)
+		}
+		c.list.SetCell(i, 0, tview.NewTableCell(name).
 			SetTextColor(nameColor))
 		c.list.SetCell(i, 1, tview.NewTableCell(e.Detail+" ").
 			SetTextColor(styles.Global.DimColor.Color()).

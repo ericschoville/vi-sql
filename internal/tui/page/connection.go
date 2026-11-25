@@ -29,8 +29,9 @@ type Connection struct {
 
 	style *config.ConnectionStyle
 
-	onSubmit func()
-	onCancel func()
+	onSubmit    func()
+	onCancel    func()
+	onCloseConn func(name string)
 }
 
 func NewConnection() *Connection {
@@ -114,6 +115,9 @@ func (c *Connection) setKeybindings() {
 			return nil
 		case k.Match(k.Common.Edit, event):
 			c.openEditForm()
+			return nil
+		case k.Match(k.Main.CloseTab, event):
+			c.closeSelectedConnection()
 			return nil
 		case k.Match(k.Common.Close, event):
 			if c.onCancel != nil {
@@ -228,7 +232,7 @@ func (c *Connection) Render() {
 	}
 
 	c.AddItem(wrap(c.table, true), 0, 1, true)
-	c.AddItem(wrap(c.preview, false), 7, 0, false)
+	c.AddItem(wrap(c.preview, false), 8, 0, false)
 
 	c.renderFooter()
 	c.AddItem(c.footer, 2, 0, false)
@@ -297,9 +301,13 @@ func (c *Connection) computeContentWidth() int {
 			lastUsed = conn.LastUsed.Format("2006-01-02 15:04")
 		}
 
+		nameCell := "  " + conn.Name // leading open/active marker occupies two columns
+		if conn.GetOptions().ReadOnly {
+			nameCell += " " + modal.ReadOnlyMarker
+		}
 		cells := []string{
 			fmt.Sprintf("%d", i+1),
-			"  " + conn.Name, // leading open/active marker occupies two columns
+			nameCell,
 			hostPort,
 			database,
 			conn.GetDriver(),
@@ -326,8 +334,13 @@ func (c *Connection) renderFooter() {
 		k.Common.Add,
 		k.Common.Edit,
 		k.Common.Delete,
-		k.Global.FullScreenHelp,
 	}
+	if c.onCloseConn != nil && len(c.App.OpenConns()) > 0 {
+		closeConn := k.Main.CloseTab
+		closeConn.Description = "Close connection"
+		keys = append(keys, closeConn)
+	}
+	keys = append(keys, k.Global.FullScreenHelp)
 	if c.onCancel != nil {
 		keys = append(keys, k.Common.Close)
 	}
@@ -384,7 +397,11 @@ func (c *Connection) renderTable() {
 				marker = fmt.Sprintf("[%s]○[-] ", styles.Global.SuccessColor)
 			}
 		}
-		c.table.SetCell(row, 1, tview.NewTableCell(" "+marker+conn.Name+" ").
+		readOnly := ""
+		if conn.GetOptions().ReadOnly {
+			readOnly = fmt.Sprintf(" [%s]%s[-]", styles.Global.WarningColor, modal.ReadOnlyMarker)
+		}
+		c.table.SetCell(row, 1, tview.NewTableCell(" "+marker+conn.Name+readOnly+" ").
 			SetReference(conn.Name).
 			SetStyle(tcell.StyleDefault.Foreground(textColor).Background(bg)))
 		c.table.SetCell(row, 2, tview.NewTableCell(" "+hostPort+" ").
@@ -458,6 +475,31 @@ func (c *Connection) deleteCurrConnection() {
 	if row > 1 {
 		c.table.Select(row-1, 0)
 	}
+}
+
+func (c *Connection) closeSelectedConnection() {
+	if c.onCloseConn == nil {
+		return
+	}
+	row, _ := c.table.GetSelection()
+	if row == 0 || row >= c.table.GetRowCount()-1 {
+		return
+	}
+	ref := c.table.GetCell(row, 1).GetReference()
+	if ref == nil {
+		return
+	}
+	connName := ref.(string)
+	if !c.App.IsConnOpen(connName) {
+		return
+	}
+	c.onCloseConn(connName)
+	c.Render()
+	c.table.Select(row, 0)
+}
+
+func (c *Connection) SetOnCloseConnFunc(onCloseConn func(name string)) {
+	c.onCloseConn = onCloseConn
 }
 
 func (c *Connection) SetOnSubmitFunc(onSubmit func()) {
@@ -539,14 +581,20 @@ func (c *Connection) updatePreview(row int) {
 	c.preview.SetCell(2, 1, value(ssl))
 	c.preview.SetCell(3, 0, label("Timeout"))
 	c.preview.SetCell(3, 1, value(timeout))
+	c.preview.SetCell(4, 0, label("Mode"))
+	if conn.GetOptions().ReadOnly {
+		c.preview.SetCell(4, 1, value(fmt.Sprintf("[%s]%s read-only[-]", styles.Global.WarningColor, modal.ReadOnlyMarker)))
+	} else {
+		c.preview.SetCell(4, 1, value("read-write"))
+	}
 
 	errorColor := styles.Global.ErrorColor.Color()
 	warningColor := styles.Global.WarningColor.Color()
 	switch {
 	case conn.Password != "" && !util.IsEncrypted(conn.Password):
-		c.preview.SetCell(4, 0, tview.NewTableCell(" ⚠ ").
+		c.preview.SetCell(5, 0, tview.NewTableCell(" ⚠ ").
 			SetStyle(tcell.StyleDefault.Foreground(errorColor).Background(bg)))
-		c.preview.SetCell(4, 1, tview.NewTableCell(fmt.Sprintf("[%s]password stored unencrypted[-]", styles.Global.ErrorColor)).SetExpansion(1))
+		c.preview.SetCell(5, 1, tview.NewTableCell(fmt.Sprintf("[%s]password stored unencrypted[-]", styles.Global.ErrorColor)).SetExpansion(1))
 	case !conn.IsPasswordReadable():
 		storedMethod := util.ParseMethodTag(conn.Password)
 		currentMethod := c.App.GetConfig().Security.Method
@@ -556,8 +604,8 @@ func (c *Connection) updatePreview(row int) {
 		} else {
 			msg = fmt.Sprintf("[%s]password unreadable — key mismatch, re-enter[-]", styles.Global.WarningColor)
 		}
-		c.preview.SetCell(4, 0, tview.NewTableCell(" ⚠ ").
+		c.preview.SetCell(5, 0, tview.NewTableCell(" ⚠ ").
 			SetStyle(tcell.StyleDefault.Foreground(warningColor).Background(bg)))
-		c.preview.SetCell(4, 1, tview.NewTableCell(msg).SetExpansion(1))
+		c.preview.SetCell(5, 1, tview.NewTableCell(msg).SetExpansion(1))
 	}
 }
